@@ -6,17 +6,21 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.utils import timezone
 from django.db.models import Sum
+from rest_framework.decorators import api_view
 
 
 # Create your views here.
 def calculate_credit_score(customer):
-    emis_paid_on_time = customer.loan_set.filter(emi_paid_on_time=True).count()
-    num_loans = customer.loan_set.count()
-    loan_activity_current_year = customer.loan_set.filter(start_date__year=timezone.now().year).count()
+    emis_paid_on_time = customer.loan_set.filter(emis_paid_on_time=True).count() or 0
+    num_loans = customer.loan_set.count() or 0
+    loan_activity_current_year = customer.loan_set.filter(start_date__year=timezone.now().year).count() or 0
     loan_approved_volume = customer.loan_set.aggregate(Sum('loan_amount'))['loan_amount__sum'] or 0
 
     credit_score = (emis_paid_on_time * 10) + (num_loans * 5) + (loan_activity_current_year * 15) + (loan_approved_volume // 10000)
-
+    if credit_score > 100:
+        credit_score = 100
+    elif credit_score <= 0 or credit_score is None:
+        credit_score = 10
     return credit_score
 
 # def calculate_total_emi_percentage(customer):
@@ -33,22 +37,30 @@ def calculate_monthly_installment(loan_amount, interest_rate, tenure):
     monthly_installment = loan_amount * (numerator / denominator)
 
     return round(monthly_installment, 2)
-
+@api_view(['GET'])
 def health(request):
     return Response(status=status.HTTP_200_OK)
 
-def register(request, methods=['POST']):
+@api_view(['POST'])
+def register(request):
     data = request.data
-    monthly_income = data.get('monthly_income')
+    print(data)
+    monthly_income = data['monthly_income']
     current_limit = round(36 * monthly_income, -5)
     customer_data = {
-        'first_name': data.get('first_name'),
-        'last_name': data.get('last_name'),
-        'phone_number': data.get('phone_number'),
-        'age': data.get('age'),
+        'first_name': data['first_name'],
+        'last_name': data['last_name'],
+        'phone_number': data['phone_number'],
+        'age': data['age'],
         'monthly_salary': monthly_income,
         'approved_limit': current_limit
     }
+    if 'approved_limit' in data.keys():
+        customer_data['approved_limit'] = data['approved_limit']
+    if 'customer_id' in data.keys():
+        customer_data['customer_id'] = data['customer_id']
+    else :
+        customer_data['customer_id'] = Customer.objects.count() + 1
     if monthly_income < 0:
         return Response({'error': 'Monthly income should be greater than 0'}, status=status.HTTP_400_BAD_REQUEST)
     elif customer_data['age'] < 0:
@@ -76,11 +88,12 @@ def validateInterestRate(interest_rate, credit_score):
         interest_rate = 16.0
     else:
         return interest_rate
+    return interest_rate
 
 def CheckApproval(data):
     credit_score  = 0
-    customer_id = data.get('customer_id')
-    interest_rate = data.get('interest_rate')
+    customer_id = data['customer_id']
+    interest_rate = data['interest_rate']
 
     try:
         customer = Customer.objects.get(customer_id=customer_id)
@@ -101,20 +114,22 @@ def CheckApproval(data):
     except Customer.DoesNotExist:
         return Response({'error': 'Customer does not exist'}, status=status.HTTP_400_BAD_REQUEST)
 
-
-def checkEligibility(request, methods=['POST']):
+@api_view(['POST'])
+def checkEligibility(request):
     credit_score  = 0
     data = request.data
-    customer_id = data.get('customer_id')
-    interest_rate = data.get('interest_rate')
-    loan_amount = data.get('loan_amount')
-    tenure = data.get('tenure')
+    print(data)
+    customer_id = data['customer_id']
+    interest_rate = data['interest_rate']
+    loan_amount = data['loan_amount']
+    tenure = data['tenure']
 
     try:
         customer = Customer.objects.get(customer_id=customer_id)
         credit_score = calculate_credit_score(customer)
+        print(f"credit score of the customer: ",credit_score)
         corrected_interest_rate = validateInterestRate(interest_rate, credit_score)
-
+        print("corrected interest rate for customer: ",corrected_interest_rate)
         response_data = {
             'customer_id': customer_id,
             'approval': CheckApproval(data)['approval'],
@@ -128,11 +143,13 @@ def checkEligibility(request, methods=['POST']):
     except Customer.DoesNotExist:
         return Response({'error': 'Customer does not exist'}, status=status.HTTP_400_BAD_REQUEST)
 
-def createLoan(request, methods=['POST']):
-    customer_id = request.data.get('customer_id')
-    loan_amount = request.data.get('loan_amount')
-    tenure = request.data.get('tenure')
-    interest_rate = request.data.get('interest_rate')
+@api_view(['POST'])
+def createLoan(request):
+    print(request.data)
+    customer_id = request.data['customer_id']
+    loan_amount = request.data['loan_amount']
+    tenure = request.data['tenure']
+    interest_rate = request.data['interest_rate']
 
     try:
         customer = Customer.objects.get(customer_id=customer_id)
@@ -140,7 +157,7 @@ def createLoan(request, methods=['POST']):
         corrected_interest_rate = validateInterestRate(interest_rate, credit_score)
         monthly_installment = calculate_monthly_installment(loan_amount, corrected_interest_rate, tenure)
         approval = CheckApproval(request.data)['approval']
-        if approval['approval']:
+        if approval:
             loan_data = {
                 'customer_id': customer_id,
                 'loan_amount': loan_amount,
@@ -165,14 +182,14 @@ def createLoan(request, methods=['POST']):
             except:
                 return Response({'error': 'Loan creation failed'}, status=status.HTTP_400_BAD_REQUEST)
         else:
-            return Response({'error': 'Loan rejected'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'Loan rejected'}, status=status.HTTP_200_OK)
     except Customer.DoesNotExist:
         return Response({'error': 'Customer does not exist'}, status=status.HTTP_400_BAD_REQUEST)
 
-
-def viewLoanById(request, methods=['GET','POST']):
+@api_view(['GET'])
+def viewLoanById(request):
     data = request.data
-    loan_id = data.get('loan_id')
+    loan_id = data['loan_id']
     try:
         loan = Loan.objects.get(loan_id=loan_id)
         customer = Customer.objects.get(customer_id=loan.customer_id)
@@ -194,8 +211,9 @@ def viewLoanById(request, methods=['GET','POST']):
         return Response({'error': 'Loan does not exist'}, status=status.HTTP_400_BAD_REQUEST)
     return Response(response_data, status=status.HTTP_200_OK)
 
-def viewLoanByCustomerId(request, methods=['GET']):
-    customer_id = request.GET.get('customer_id')
+@api_view(['GET'])
+def viewLoanByCustomerId(request):
+    customer_id = request.data['customer_id']
     try:
         customer = Customer.objects.get(customer_id=customer_id)
         loans = Loan.objects.filter(customer_id=customer_id)
